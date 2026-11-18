@@ -868,6 +868,10 @@ with tabs[2]:
                 hide_index=True,
             )
 
+            st.caption("Copy the symbols shown above for the selected lookback window.")
+            persistence_symbols = tickers.head(100)["symbol"].tolist()
+            st.code(",".join(persistence_symbols), language=None)
+
         st.markdown("### Theme persistence frequency")
         bull = make_core_bullish(rows[rows["session_date"].isin(lookback)])
         if not bull.empty:
