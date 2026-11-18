@@ -33,14 +33,20 @@ def using_supabase():
     )
 
 
-@st.cache_resource
 def get_supabase():
     if not using_supabase():
         return None
-    return create_client(
-        st.secrets["supabase"]["url"],
-        st.secrets["supabase"]["service_role_key"],
+    # Read current settings at call time, then cache by URL and key. This
+    # prevents Streamlit from reusing a client created with an older secret.
+    return _get_supabase_client(
+        st.secrets["supabase"]["url"].strip(),
+        st.secrets["supabase"]["service_role_key"].strip(),
     )
+
+
+@st.cache_resource
+def _get_supabase_client(url: str, key: str):
+    return create_client(url, key)
 
 
 def get_conn():
