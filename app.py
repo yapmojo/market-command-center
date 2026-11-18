@@ -770,12 +770,17 @@ def theme_members(day, theme, fallback_metric="rs3m", limit=20):
         matched.groupby("symbol", as_index=False)
         .agg(
             theme=("theme", "first"),
-            avg_volume_30d=("avg_volume_30d", "max"),
             rs1m=("rs1m", "median"),
             rs3m=("rs3m", "median"),
             rvol=("rvol", "median"),
         )
     )
+    latest_volume = (
+        matched[matched["avg_volume_30d"].notna()]
+        .sort_values("session_date")
+        .drop_duplicates("symbol", keep="last")[["symbol", "avg_volume_30d"]]
+    )
+    members = members.merge(latest_volume, on="symbol", how="left")
     days_present = (
         matched.drop_duplicates(["session_date", "symbol"])
         .groupby("symbol")["session_date"]
@@ -807,7 +812,7 @@ def render_theme_members(day, theme, context, fallback_metric="rs3m"):
         st.caption("Top 20 ranked by 30-day average volume.")
     else:
         st.caption(
-            "No 30-day average volume is saved for this session yet. "
+            "No 30-day average volume is saved for this period yet. "
             "Showing the top 20 by relative strength until your CSVs include "
             "an AvgVol30D or Avg Volume 30D column."
         )
