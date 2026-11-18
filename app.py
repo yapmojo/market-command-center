@@ -77,6 +77,7 @@ def init_db():
             rs3m REAL,
             adr REAL,
             dollar_vol_b REAL,
+            avg_volume_30d REAL,
             pct_change REAL,
             theme TEXT,
             PRIMARY KEY (session_date, scan_key, symbol)
@@ -87,6 +88,11 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_scan_rows_theme ON scan_rows(theme);
         """
     )
+    existing_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(scan_rows)").fetchall()
+    }
+    if "avg_volume_30d" not in existing_columns:
+        conn.execute("ALTER TABLE scan_rows ADD COLUMN avg_volume_30d REAL")
     conn.commit()
     conn.close()
 
@@ -137,6 +143,7 @@ def save_session(session_date, uploads, notes=""):
                     "rs3m": _nan_to_none(r["rs3m"]),
                     "adr": _nan_to_none(r["adr"]),
                     "dollar_vol_b": _nan_to_none(r["dollar_vol_b"]),
+                    "avg_volume_30d": _nan_to_none(r["avg_volume_30d"]),
                     "pct_change": _nan_to_none(r["pct_change"]),
                     "theme": str(r["theme"]),
                 })
@@ -168,6 +175,7 @@ def save_session(session_date, uploads, notes=""):
                     r["rs3m"],
                     r["adr"],
                     r["dollar_vol_b"],
+                    r["avg_volume_30d"],
                     r["pct_change"],
                     r["theme"],
                 ))
@@ -175,8 +183,8 @@ def save_session(session_date, uploads, notes=""):
             """
             INSERT OR REPLACE INTO scan_rows
             (session_date, scan_key, symbol, sub_industry, rvol, rs1m, rs3m, adr,
-             dollar_vol_b, pct_change, theme)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             dollar_vol_b, avg_volume_30d, pct_change, theme)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -216,10 +224,10 @@ def load_rows(start=None, end=None):
         return pd.DataFrame(columns=[
             "session_date", "scan_key", "symbol", "sub_industry",
             "rvol", "rs1m", "rs3m", "adr", "dollar_vol_b",
-            "pct_change", "theme"
+            "avg_volume_30d", "pct_change", "theme"
         ])
 
-    for c in ["rvol", "rs1m", "rs3m", "adr", "dollar_vol_b", "pct_change"]:
+    for c in ["rvol", "rs1m", "rs3m", "adr", "dollar_vol_b", "avg_volume_30d", "pct_change"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
@@ -308,6 +316,23 @@ def auto_assign_uploads(uploaded_files):
 
     return assigned, unknown, duplicates
 
+def parse_average_volume(value):
+    if pd.isna(value):
+        return np.nan
+    text = str(value).strip().replace(",", "")
+    if not text or text.lower() in {"nan", "none"}:
+        return np.nan
+    multiplier = 1
+    suffix = text[-1].upper()
+    if suffix in {"K", "M", "B"}:
+        multiplier = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}[suffix]
+        text = text[:-1].strip()
+    try:
+        return float(text) * multiplier
+    except ValueError:
+        return pd.to_numeric(text, errors="coerce")
+
+
 def read_tos_csv(uploaded_file):
     raw = uploaded_file.getvalue()
     text = raw.decode("utf-8-sig", errors="ignore")
@@ -334,6 +359,12 @@ def read_tos_csv(uploaded_file):
         "rs3m": ["jeffRS3month.c", "RS3M", "RS 3M", "3M RS"],
         "adr": ["ADR", "ADR%"],
         "dollar_vol_b": ["jeff$VolBillion", "$VolBillion", "Dollar Vol B", "Dollar Volume B"],
+        "avg_volume_30d": [
+            "AvgVol30D", "Avg Vol 30D", "Avg Volume 30D", "Avg Volume (30D)",
+            "30D Avg Volume", "30 Day Avg Volume", "30-Day Average Volume",
+            "Average Volume 30D", "Average Volume (30 Days)", "30 Day Average Volume",
+            "avg_volume_30d",
+        ],
         "pct_change": ["jy%change", "%Change", "% Change", "Pct Change", "Change %"],
     }
     rename = {}
@@ -358,6 +389,10 @@ def read_tos_csv(uploaded_file):
             .replace({"nan": np.nan, "None": np.nan, "": np.nan})
         )
         df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    if "avg_volume_30d" not in df.columns:
+        df["avg_volume_30d"] = np.nan
+    df["avg_volume_30d"] = df["avg_volume_30d"].map(parse_average_volume)
 
     df = df[df["Symbol"].str.len() > 0].copy()
     return df
@@ -644,6 +679,72 @@ def theme_status(current, history):
     return pd.DataFrame(recs).sort_values("today", ascending=False)
 
 
+def selected_plotly_point(event):
+    if isinstance(event, dict):
+        selection = event.get("selection", {})
+        points = selection.get("points", []) if isinstance(selection, dict) else []
+    else:
+        selection = getattr(event, "selection", None)
+        points = getattr(selection, "points", []) if selection is not None else []
+    return points[-1] if points else None
+
+
+def theme_members(day, theme, fallback_metric="rs3m", limit=20):
+    bullish = make_core_bullish(day)
+    matched = bullish[bullish["theme"] == theme].copy()
+    if matched.empty:
+        return pd.DataFrame(), False
+    if "avg_volume_30d" not in matched.columns:
+        matched["avg_volume_30d"] = np.nan
+
+    members = (
+        matched.groupby("symbol", as_index=False)
+        .agg(
+            theme=("theme", "first"),
+            avg_volume_30d=("avg_volume_30d", "max"),
+            rs1m=("rs1m", "median"),
+            rs3m=("rs3m", "median"),
+            rvol=("rvol", "median"),
+        )
+    )
+    volume_available = members["avg_volume_30d"].notna().any()
+    sort_column = "avg_volume_30d" if volume_available else fallback_metric
+    members = members.sort_values(
+        sort_column, ascending=False, na_position="last"
+    ).head(limit)
+    return members, volume_available
+
+
+def render_theme_members(day, theme, context, fallback_metric="rs3m"):
+    members, volume_available = theme_members(day, theme, fallback_metric=fallback_metric)
+    st.markdown(f"#### {theme} — {context}")
+    if members.empty:
+        st.info("No bullish scan members were saved for this theme on this session.")
+        return
+
+    if volume_available:
+        st.caption("Top 20 ranked by 30-day average volume.")
+    else:
+        st.caption(
+            "No 30-day average volume is saved for this session yet. "
+            "Showing the top 20 by relative strength until your CSVs include "
+            "an AvgVol30D or Avg Volume 30D column."
+        )
+
+    display = members[["symbol", "avg_volume_30d", "rs1m", "rs3m", "rvol"]].rename(
+        columns={
+            "symbol": "Ticker",
+            "avg_volume_30d": "30D Avg Volume",
+            "rs1m": "RS 1M",
+            "rs3m": "RS 3M",
+            "rvol": "RVOL",
+        }
+    )
+    st.dataframe(display, use_container_width=True, hide_index=True)
+    st.caption("Use the copy icon to copy these comma-separated tickers.")
+    st.code(",".join(members["symbol"].tolist()), language=None)
+
+
 def chart_template(fig, height=430):
     fig.update_layout(
         height=height,
@@ -766,12 +867,34 @@ with tabs[1]:
             st.markdown("### Today’s bullish theme participation")
             tp = theme_participation_for_date(rows, selected)
             if not tp.empty:
+                st.caption("Warmer bars indicate more bullish scan participants. Click a bar to see the theme’s top liquid tickers.")
+                tp_plot = tp.sort_values("stocks", ascending=True)
                 fig = px.bar(
-                    tp.sort_values("stocks", ascending=True),
-                    x="stocks", y="theme", orientation="h",
-                    labels={"stocks": "Unique stocks", "theme": ""}
+                    tp_plot,
+                    x="stocks", y="theme", orientation="h", color="stocks",
+                    color_continuous_scale="YlOrRd",
+                    range_color=(0, max(1, int(tp_plot["stocks"].max()))),
+                    custom_data=["theme"],
+                    labels={"stocks": "Unique stocks", "theme": "", "color": "Participation"}
                 )
-                st.plotly_chart(chart_template(fig, 480), use_container_width=True)
+                participation_event = st.plotly_chart(
+                    chart_template(fig, 480),
+                    use_container_width=True,
+                    key="dashboard_theme_participation",
+                    on_select="rerun",
+                    selection_mode=["points"],
+                )
+                participation_point = selected_plotly_point(participation_event)
+                if participation_point:
+                    custom = participation_point.get("customdata") or []
+                    participation_theme = participation_point.get("y")
+                    if not participation_theme and custom:
+                        participation_theme = custom[0]
+                    if participation_theme:
+                        render_theme_members(
+                            day, participation_theme, "bullish participation",
+                            fallback_metric="rs3m",
+                        )
 
         with right:
             st.markdown("### Theme RS quality")
@@ -791,9 +914,29 @@ with tabs[1]:
                     rq_long,
                     x="RS", y="theme", color="Metric",
                     barmode="group", orientation="h",
+                    custom_data=["theme", "Metric"],
                     labels={"theme": "", "RS": "Median RS"}
                 )
-                st.plotly_chart(chart_template(fig, 480), use_container_width=True)
+                rs_event = st.plotly_chart(
+                    chart_template(fig, 480),
+                    use_container_width=True,
+                    key="dashboard_theme_rs_quality",
+                    on_select="rerun",
+                    selection_mode=["points"],
+                )
+                rs_point = selected_plotly_point(rs_event)
+                if rs_point:
+                    custom = rs_point.get("customdata") or []
+                    rs_theme = rs_point.get("y")
+                    if not rs_theme and custom:
+                        rs_theme = custom[0]
+                    rs_metric = custom[1] if len(custom) > 1 else None
+                    if rs_theme:
+                        metric_sort = "rs1m" if rs_metric == "Median RS 1M" else "rs3m"
+                        metric_label = rs_metric or "Median RS 3M"
+                        render_theme_members(
+                            day, rs_theme, metric_label, fallback_metric=metric_sort,
+                        )
 
         st.markdown("### Theme persistence")
         default_themes = [
