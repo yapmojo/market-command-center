@@ -1150,6 +1150,36 @@ with tabs[2]:
         tickers = ticker_persistence(rows, lookback)
         if not tickers.empty:
             st.markdown(f"### Recurring leaders — last {len(lookback)} saved sessions")
+            chart_rows = tickers.head(20).copy()
+            chart_rows["persistence_rate"] = chart_rows["days_present"] / len(lookback)
+            chart_rows["session_label"] = chart_rows["days_present"].astype(str) + f"/{len(lookback)} sessions"
+            chart_rows = chart_rows.sort_values("days_present", ascending=True)
+            fig = px.bar(
+                chart_rows,
+                x="days_present",
+                y="symbol",
+                orientation="h",
+                color="persistence_rate",
+                color_continuous_scale="YlOrRd",
+                range_color=(0, 1),
+                text="session_label",
+                custom_data=["theme", "persistence_rate"],
+                labels={
+                    "days_present": "Saved sessions present",
+                    "symbol": "",
+                    "persistence_rate": "Share of sessions",
+                },
+                hover_data=["theme", "10ema_days", "scan_types", "rs1m", "rs3m"],
+            )
+            fig.update_traces(textposition="outside", cliponaxis=False)
+            fig.update_layout(
+                height=max(360, 28 * len(chart_rows) + 100),
+                margin=dict(l=20, r=100, t=55, b=20),
+                xaxis_range=[0, max(int(chart_rows["days_present"].max()) + 2, 3)],
+            )
+            st.caption("Warmer color means the ticker appeared in a larger share of the selected sessions.")
+            st.plotly_chart(fig, use_container_width=True)
+
             st.dataframe(
                 tickers[["symbol", "theme", "days_present", "10ema_days",
                          "scan_types", "rs1m", "rs3m", "rvol"]].head(100),
