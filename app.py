@@ -521,6 +521,37 @@ def theme_participation_for_date(rows, session_date):
     )
 
 
+def theme_participation_for_period(rows, session_dates):
+    period_rows = rows[rows["session_date"].isin(session_dates)]
+    bull = make_core_bullish(period_rows)
+    if bull.empty:
+        return pd.DataFrame(
+            columns=["theme", "avg_stocks_per_session", "days_active", "ticker_days"]
+        )
+
+    daily = (
+        bull.drop_duplicates(["session_date", "theme", "symbol"])
+        .groupby(["session_date", "theme"])["symbol"]
+        .nunique()
+        .rename("stocks")
+        .reset_index()
+    )
+    summary = (
+        daily.groupby("theme")
+        .agg(
+            ticker_days=("stocks", "sum"),
+            days_active=("session_date", "nunique"),
+        )
+        .reset_index()
+    )
+    session_count = max(len(session_dates), 1)
+    summary["avg_stocks_per_session"] = summary["ticker_days"] / session_count
+    return summary.sort_values(
+        ["avg_stocks_per_session", "days_active", "ticker_days"],
+        ascending=False,
+    )
+
+
 def theme_persistence(rows, themes=None):
     recs = []
     for d in sorted(rows["session_date"].unique()):
@@ -745,8 +776,20 @@ def theme_members(day, theme, fallback_metric="rs3m", limit=20):
             rvol=("rvol", "median"),
         )
     )
+    days_present = (
+        matched.drop_duplicates(["session_date", "symbol"])
+        .groupby("symbol")["session_date"]
+        .nunique()
+        .rename("days_present")
+        .reset_index()
+    )
+    members = members.merge(days_present, on="symbol", how="left")
     volume_available = members["avg_volume_30d"].notna().any()
-    sort_column = "avg_volume_30d" if volume_available else fallback_metric
+    if volume_available:
+        members = members[members["avg_volume_30d"].notna()]
+        sort_column = "avg_volume_30d"
+    else:
+        sort_column = fallback_metric
     members = members.sort_values(
         sort_column, ascending=False, na_position="last"
     ).head(limit)
@@ -769,9 +812,10 @@ def render_theme_members(day, theme, context, fallback_metric="rs3m"):
             "an AvgVol30D or Avg Volume 30D column."
         )
 
-    display = members[["symbol", "avg_volume_30d", "rs1m", "rs3m", "rvol"]].rename(
+    display = members[["symbol", "days_present", "avg_volume_30d", "rs1m", "rs3m", "rvol"]].rename(
         columns={
             "symbol": "Ticker",
+            "days_present": "Sessions Present",
             "avg_volume_30d": "30D Avg Volume",
             "rs1m": "RS 1M",
             "rs3m": "RS 3M",
@@ -902,23 +946,61 @@ with tabs[1]:
         left, right = st.columns(2)
 
         with left:
-            st.markdown("### Today’s bullish theme participation")
-            tp = theme_participation_for_date(rows, selected)
-            if not tp.empty:
-                st.caption("Warmer bars indicate more bullish scan participants. Click a bar to see the theme’s top liquid tickers.")
-                tp_plot = tp.sort_values("stocks", ascending=True)
+            st.markdown("### Bullish theme participation")
+            participation_window = st.radio(
+                "Period",
+                ["Today", "1 Week", "1 Month", "3 Months"],
+                horizontal=True,
+                key="dashboard_theme_participation_window",
+            )
+            if participation_window == "Today":
+                participation_dates = [selected]
+                participation_rows = day
+                tp = theme_participation_for_date(rows, selected)
+                tp_plot_base = tp.assign(strength=tp["stocks"]) if not tp.empty else tp
+                strength_label = "Bullish participants"
+                period_caption = "Today’s unique bullish scan participants."
+            else:
+                session_lengths = {"1 Week": 5, "1 Month": 20, "3 Months": 60}
+                available_dates = sorted(
+                    rows.loc[rows["session_date"] <= selected, "session_date"].unique()
+                )
+                participation_dates = available_dates[-session_lengths[participation_window]:]
+                participation_rows = rows[rows["session_date"].isin(participation_dates)]
+                tp = theme_participation_for_period(rows, participation_dates)
+                tp_plot_base = tp.rename(
+                    columns={"avg_stocks_per_session": "strength"}
+                ) if not tp.empty else tp
+                strength_label = "Avg participants / session"
+                period_caption = (
+                    f"Average unique bullish participants per saved session across "
+                    f"the last {len(participation_dates)} sessions through {selected}."
+                )
+
+            st.caption(
+                "Warmer bars indicate stronger breadth. Click a bar to see the theme’s "
+                "ticker list for the selected period. " + period_caption
+            )
+            if not tp_plot_base.empty:
+                tp_plot = tp_plot_base.sort_values("strength", ascending=True)
                 fig = px.bar(
                     tp_plot,
-                    x="stocks", y="theme", orientation="h", color="stocks",
+                    x="strength", y="theme", orientation="h", color="strength",
                     color_continuous_scale="YlOrRd",
-                    range_color=(0, max(1, int(tp_plot["stocks"].max()))),
+                    range_color=(0, max(1, float(tp_plot["strength"].max()))),
                     custom_data=["theme"],
-                    labels={"stocks": "Unique stocks", "theme": "", "color": "Participation"}
+                    hover_data={
+                        "days_active": True,
+                        "ticker_days": True,
+                        "strength": ":.1f",
+                        "theme": False,
+                    } if participation_window != "Today" else None,
+                    labels={"strength": strength_label, "theme": "", "color": strength_label}
                 )
                 participation_event = st.plotly_chart(
                     chart_template(fig, 480),
                     use_container_width=True,
-                    key="dashboard_theme_participation",
+                    key=f"dashboard_theme_participation_{participation_window}",
                     on_select="rerun",
                     selection_mode=["points"],
                 )
@@ -929,8 +1011,11 @@ with tabs[1]:
                     if not participation_theme and custom:
                         participation_theme = custom[0]
                     if participation_theme:
+                        context = f"{participation_window} bullish participation"
                         render_theme_members(
-                            day, participation_theme, "bullish participation",
+                            participation_rows,
+                            participation_theme,
+                            context,
                             fallback_metric="rs3m",
                         )
 
