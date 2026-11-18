@@ -638,6 +638,44 @@ def ticker_persistence(rows, lookback_dates):
     return p.sort_values(["days_present", "rs3m", "10ema_days"], ascending=False)
 
 
+def multiscan_persistence(rows, lookback_dates):
+    daily_frames = []
+    for session_date in lookback_dates:
+        leaders = overlap_table(rows, session_date)
+        if leaders.empty:
+            continue
+        leaders = leaders[leaders["overlap"] >= 2].copy()
+        if leaders.empty:
+            continue
+        leaders["session_date"] = session_date
+        leaders["10ema_hit"] = leaders["10ema_confirm"].astype(int)
+        daily_frames.append(leaders)
+
+    if not daily_frames:
+        return pd.DataFrame()
+
+    daily = pd.concat(daily_frames, ignore_index=True)
+    summary = (
+        daily.groupby("symbol")
+        .agg(
+            multiscan_days=("session_date", "nunique"),
+            total_scan_appearances=("overlap", "sum"),
+            max_scans=("overlap", "max"),
+            theme=("theme", "last"),
+            rs1m=("rs1m", "median"),
+            rs3m=("rs3m", "median"),
+            rvol=("rvol", "median"),
+            tenema_days=("10ema_hit", "sum"),
+        )
+        .reset_index()
+    )
+    return summary.sort_values(
+        ["multiscan_days", "total_scan_appearances", "rs3m"],
+        ascending=False,
+        na_position="last",
+    )
+
+
 def theme_status(current, history):
     if current.empty:
         return pd.DataFrame()
@@ -973,16 +1011,34 @@ with tabs[1]:
             )
 
         st.markdown("### Multi-scan leaders")
-        ov = overlap_table(rows, selected)
-        if not ov.empty:
+        multiscan_window = st.radio(
+            "Lookback saved sessions",
+            [5, 10, 15, 30],
+            horizontal=True,
+            key="dashboard_multiscan_lookback",
+        )
+        dashboard_history = rows[rows["session_date"] <= selected]
+        history_dates = sorted(dashboard_history["session_date"].unique())[-multiscan_window:]
+        multiscan = multiscan_persistence(rows, history_dates)
+        st.caption(
+            f"Looking across the last {len(history_dates)} saved sessions through {selected}. "
+            "A multi-scan day means a ticker appeared in at least two bullish scans."
+        )
+        if not multiscan.empty:
             st.dataframe(
-                ov[["symbol", "theme", "overlap", "10ema_confirm", "scans",
-                    "pct_change", "rvol", "rs1m", "rs3m"]].head(30),
-                use_container_width=True, hide_index=True
+                multiscan[["symbol", "theme", "multiscan_days", "total_scan_appearances",
+                           "max_scans", "tenema_days", "rs1m", "rs3m", "rvol"]],
+                use_container_width=True,
+                hide_index=True,
             )
+            st.caption("Copy the ranked ticker list:")
+            st.code(",".join(multiscan["symbol"].tolist()), language=None)
+        else:
+            st.info("No multi-scan leaders found in this lookback.")
 
         st.markdown("### Top 20 for chart review")
-        top20 = ov.head(20)["symbol"].tolist() if not ov.empty else []
+        daily_ov = overlap_table(rows, selected)
+        top20 = daily_ov.head(20)["symbol"].tolist() if not daily_ov.empty else []
         if top20:
             st.code(",".join(top20), language=None)
 
