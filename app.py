@@ -1326,20 +1326,19 @@ with tabs[4]:
 
 with tabs[5]:
     st.subheader("Ticker Copier")
-    st.caption("Paste a CSV and extract a unique, comma-separated ticker list. This tool does not save data to your scan history or Supabase.")
-    csv_text = st.text_area(
-        "Paste CSV text",
-        height=240,
-        placeholder="Paste the CSV contents here, including the header row if available.",
-        key="ticker_copier_csv",
+    st.caption("Drop a CSV here and the app will extract unique tickers automatically. The file and results are not saved to scan history or Supabase.")
+    uploaded_csv = st.file_uploader(
+        "Drop CSV file here or browse",
+        type=["csv"],
+        accept_multiple_files=False,
+        key="ticker_copier_upload",
     )
-    if st.button("Extract tickers", key="extract_tickers_button"):
-        st.session_state["ticker_copier_result"] = extract_tickers_from_csv_text(csv_text)
 
-    tickers = st.session_state.get("ticker_copier_result")
-    if tickers is not None:
+    if uploaded_csv is not None:
+        csv_text = uploaded_csv.getvalue().decode("utf-8-sig", errors="ignore")
+        tickers = extract_tickers_from_csv_text(csv_text)
         if tickers:
-            st.success(f"Found {len(tickers)} unique ticker{'s' if len(tickers) != 1 else ''}.")
+            st.success(f"Found {len(tickers)} unique ticker{'s' if len(tickers) != 1 else ''} in {uploaded_csv.name}.")
             st.caption("Click the copy icon on the right side of the box.")
             st.code(",".join(tickers), language=None)
         else:
