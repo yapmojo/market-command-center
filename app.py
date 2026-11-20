@@ -1,6 +1,7 @@
 
 import csv
 import io
+import json
 import re
 import sqlite3
 from datetime import date
@@ -10,6 +11,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
 from supabase import create_client
 
 APP_TITLE = "Market Command Center"
@@ -25,6 +27,54 @@ SCAN_KEYS = {
 
 CORE_BULLISH_SCANS = {"rotation", "dcr", "trend47", "ep_positive"}
 CONFIRMATION_SCAN = "trend10ema"
+
+
+def copy_ticker_button(symbols):
+    tickers = ",".join(symbols)
+    payload = json.dumps(tickers).replace("<", "\\u003c")
+    disabled = "" if tickers else "disabled"
+    components.html(
+        """
+        <style>
+            body { margin: 0; font: 14px sans-serif; }
+            button {
+                color: #f5f5f5; font: inherit; padding: 5px 10px;
+                border: 1px solid #80808080; border-radius: 6px;
+                background: #292826; cursor: pointer;
+            }
+            button:disabled { opacity: .5; cursor: default; }
+        </style>
+        <button type="button" """ + disabled + """>Copy tickers</button>
+        <script>
+            const tickers = """ + payload + """;
+            const button = document.querySelector("button");
+            button.addEventListener("click", async () => {
+                let copied = false;
+                try {
+                    await navigator.clipboard.writeText(tickers);
+                    copied = true;
+                } catch {
+                    const field = document.createElement("textarea");
+                    field.value = tickers;
+                    field.style.position = "fixed";
+                    field.style.opacity = "0";
+                    document.body.append(field);
+                    field.select();
+                    try {
+                        copied = document.execCommand("copy");
+                    } catch {
+                        copied = false;
+                    } finally {
+                        field.remove();
+                        button.focus();
+                    }
+                }
+                button.textContent = copied ? "Copied!" : "Copy failed";
+            });
+        </script>
+        """,
+        height=34,
+    )
 
 
 def using_supabase():
@@ -1143,15 +1193,21 @@ with tabs[1]:
         ep = day[day["scan_key"] == "ep"].copy()
         p1, p2 = st.columns(2)
         with p1:
-            st.write("**Positive EP**")
             pos = ep[ep["pct_change"] > 0].sort_values("pct_change", ascending=False)
+            label, copy = st.columns([2, 1], vertical_alignment="center")
+            label.write("**Positive EP**")
+            with copy:
+                copy_ticker_button(pos["symbol"].tolist())
             st.dataframe(
                 pos[["symbol", "theme", "pct_change", "rvol", "rs1m", "rs3m"]],
                 use_container_width=True, hide_index=True
             )
         with p2:
-            st.write("**Negative EP / distribution**")
             neg = ep[ep["pct_change"] < 0].sort_values("pct_change")
+            label, copy = st.columns([2, 1], vertical_alignment="center")
+            label.write("**Negative EP / distribution**")
+            with copy:
+                copy_ticker_button(neg["symbol"].tolist())
             st.dataframe(
                 neg[["symbol", "theme", "pct_change", "rvol", "rs1m", "rs3m"]],
                 use_container_width=True, hide_index=True
@@ -1172,14 +1228,13 @@ with tabs[1]:
             "A multi-scan day means a ticker appeared in at least two bullish scans."
         )
         if not multiscan.empty:
+            copy_ticker_button(multiscan["symbol"].tolist())
             st.dataframe(
                 multiscan[["symbol", "theme", "multiscan_days", "total_scan_appearances",
                            "max_scans", "tenema_days", "rs1m", "rs3m", "rvol"]],
                 use_container_width=True,
                 hide_index=True,
             )
-            st.caption("Copy the ranked ticker list:")
-            st.code(",".join(multiscan["symbol"].tolist()), language=None)
         else:
             st.info("No multi-scan leaders found in this lookback.")
 
