@@ -1,5 +1,7 @@
 
+import csv
 import io
+import re
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -251,6 +253,61 @@ def get_dates():
     )
     conn.close()
     return df
+
+
+def extract_tickers_from_csv_text(text):
+    """Extract unique ticker symbols from a pasted CSV without saving the data."""
+    lines = (text or "").lstrip("\\ufeff").splitlines()
+    if not lines:
+        return []
+
+    ticker_headers = {
+        "symbol", "ticker", "tickersymbol", "stocksymbol",
+        "underlyingsymbol", "securitysymbol",
+    }
+    header_idx = None
+    ticker_col = None
+    for i, line in enumerate(lines[:50]):
+        try:
+            cells = next(csv.reader([line]))
+        except (csv.Error, StopIteration):
+            continue
+        normalized = [re.sub(r"[^a-z0-9]", "", cell.lower()) for cell in cells]
+        match = next((j for j, name in enumerate(normalized) if name in ticker_headers), None)
+        if match is not None:
+            header_idx, ticker_col = i, match
+            break
+
+    rows = []
+    try:
+        parsed_rows = list(csv.reader(lines[header_idx:] if header_idx is not None else lines))
+    except csv.Error:
+        parsed_rows = []
+
+    if header_idx is not None:
+        rows = [row[ticker_col] for row in parsed_rows[1:] if len(row) > ticker_col]
+    elif len([row for row in parsed_rows if any(cell.strip() for cell in row)]) == 1:
+        rows = [
+            cell
+            for row in parsed_rows
+            for cell in row
+        ]
+    else:
+        rows = [row[0] for row in parsed_rows if row]
+
+    tickers = []
+    seen = set()
+    for value in rows:
+        ticker = str(value or "").strip().strip('"').strip("'").upper()
+        ticker = ticker.removeprefix("$").strip()
+        if ticker in {"", "NAN", "NONE", "NULL", "SYMBOL", "TICKER"}:
+            continue
+        if not re.fullmatch(r"[A-Z0-9^][A-Z0-9.\\-/^]{0,14}", ticker):
+            continue
+        if ticker not in seen:
+            seen.add(ticker)
+            tickers.append(ticker)
+    return tickers
 
 def detect_scan_type(uploaded_file):
     """
@@ -855,7 +912,7 @@ if using_supabase():
 else:
     st.warning("Cloud history not connected yet. Using temporary local storage.")
 
-tabs = st.tabs(["Upload & Run", "Dashboard", "Persistence", "Stock Explorer", "History"])
+tabs = st.tabs(["Upload & Run", "Dashboard", "Persistence", "Stock Explorer", "History", "Ticker Copier"])
 
 with tabs[0]:
     st.subheader("Daily scan upload")
@@ -1265,3 +1322,25 @@ with tabs[4]:
                 conn.close()
             st.success(f"Deleted {delete_date}.")
             st.rerun()
+
+
+with tabs[5]:
+    st.subheader("Ticker Copier")
+    st.caption("Paste a CSV and extract a unique, comma-separated ticker list. This tool does not save data to your scan history or Supabase.")
+    csv_text = st.text_area(
+        "Paste CSV text",
+        height=240,
+        placeholder="Paste the CSV contents here, including the header row if available.",
+        key="ticker_copier_csv",
+    )
+    if st.button("Extract tickers", key="extract_tickers_button"):
+        st.session_state["ticker_copier_result"] = extract_tickers_from_csv_text(csv_text)
+
+    tickers = st.session_state.get("ticker_copier_result")
+    if tickers is not None:
+        if tickers:
+            st.success(f"Found {len(tickers)} unique ticker{'s' if len(tickers) != 1 else ''}.")
+            st.caption("Click the copy icon on the right side of the box.")
+            st.code(",".join(tickers), language=None)
+        else:
+            st.warning("No tickers found. Check that the CSV includes a Symbol or Ticker column, or one ticker per row.")
