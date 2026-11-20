@@ -257,7 +257,7 @@ def get_dates():
 
 def extract_tickers_from_csv_text(text):
     """Extract unique ticker symbols from a pasted CSV without saving the data."""
-    lines = (text or "").lstrip("\\ufeff").splitlines()
+    lines = (text or "").lstrip(chr(0xFEFF)).splitlines()
     if not lines:
         return []
 
@@ -302,7 +302,7 @@ def extract_tickers_from_csv_text(text):
         ticker = ticker.removeprefix("$").strip()
         if ticker in {"", "NAN", "NONE", "NULL", "SYMBOL", "TICKER"}:
             continue
-        if not re.fullmatch(r"[A-Z0-9^][A-Z0-9.\\-/^]{0,14}", ticker):
+        if not re.fullmatch(r"[A-Z0-9^][A-Z0-9.^/-]{0,14}", ticker):
             continue
         if ticker not in seen:
             seen.add(ticker)
